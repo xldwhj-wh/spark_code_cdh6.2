@@ -600,9 +600,9 @@ private[deploy] class Worker(
           logError(s"Asked to kill unknown driver $driverId")
       }
 
-    //处理DriverRunner发送过来的driverStateChanged（DriverStateChanged）信息
+    //driver执行完之后，DriverRunner线程会发送过来driverStateChanged（DriverStateChanged）取得的driver状态信息
     case driverStateChanged @ DriverStateChanged(driverId, state, exception) =>
-      //调用handleDriverStateChanged向master发送driverStateChanged（driver启动后的状态码）
+      /调用handleDriverStateChanged向master发送driverStateChanged（driver启动后的状态码）
       handleDriverStateChanged(driverStateChanged)
 
     case ReregisterWithMaster =>
@@ -721,7 +721,6 @@ private[deploy] class Worker(
     }
     //向master发送driverStateChanged消息
     sendToMaster(driverStateChanged)
-    //
     val driver = drivers.remove(driverId).get
     finishedDrivers(driverId) = driver
     trimFinishedDriversIfNecessary()

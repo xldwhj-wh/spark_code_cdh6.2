@@ -712,11 +712,12 @@ private[deploy] class Master(
         var keepScheduling = true
         while (keepScheduling && canLaunchExecutor(pos)) {
           coresToAssign -= minCoresPerExecutor
+          // 如果每个Worker只启动一个Executor(那么minCoresPerExecutor为1) ，那么每一次循环给这个Executor分配一个core
           assignedCores(pos) += minCoresPerExecutor
 
           // If we are launching one executor per worker, then every iteration assigns 1 core
           // to the executor. Otherwise, every iteration assigns cores to a new executor.
-          // 如果每个Worker只启动一个Executor ，那么每一次循环给这个Executor分配一个core
+          // 如果oneExecutorPerWorker为真，那么每个Worker只启动一个Executor，否则调度一次分配一个Executor
           if (oneExecutorPerWorker) {
             assignedExecutors(pos) = 1
           } else {
