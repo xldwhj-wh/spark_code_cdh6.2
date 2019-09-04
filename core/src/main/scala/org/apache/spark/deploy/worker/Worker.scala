@@ -571,9 +571,10 @@ private[deploy] class Worker(
             logInfo("Asked to kill unknown executor " + fullId)
         }
       }
-
+     //处理Master发送过来的LaunchDriver
     case LaunchDriver(driverId, driverDesc) =>
       logInfo(s"Asked to launch driver $driverId")
+      //创建DriverRunner
       val driver = new DriverRunner(
         conf,
         driverId,
@@ -584,8 +585,9 @@ private[deploy] class Worker(
         workerUri,
         securityMgr)
       drivers(driverId) = driver
+      //调用DriverRunner的start方法
       driver.start()
-
+      //worker已使用的core加上分配给driver的core，已使用的内存加上分配给driver的内存
       coresUsed += driverDesc.cores
       memoryUsed += driverDesc.mem
 
@@ -598,7 +600,9 @@ private[deploy] class Worker(
           logError(s"Asked to kill unknown driver $driverId")
       }
 
+    //处理DriverRunner发送过来的driverStateChanged（DriverStateChanged）信息
     case driverStateChanged @ DriverStateChanged(driverId, state, exception) =>
+      //调用handleDriverStateChanged向master发送driverStateChanged（driver启动后的状态码）
       handleDriverStateChanged(driverStateChanged)
 
     case ReregisterWithMaster =>
@@ -715,7 +719,9 @@ private[deploy] class Worker(
       case _ =>
         logDebug(s"Driver $driverId changed state to $state")
     }
+    //向master发送driverStateChanged消息
     sendToMaster(driverStateChanged)
+    //
     val driver = drivers.remove(driverId).get
     finishedDrivers(driverId) = driver
     trimFinishedDriversIfNecessary()

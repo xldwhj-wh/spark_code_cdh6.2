@@ -37,6 +37,7 @@ import org.apache.spark.util.{Clock, ShutdownHookManager, SystemClock, Utils}
 /**
  * Manages the execution of one driver, including automatically restarting the driver on failure.
  * This is currently only used in standalone cluster deploy mode.
+  * 管理一个Driver的执行，包括在driver失败时自动重启Driver，目前该种方式仅使用在Standalone模式下
  */
 private[deploy] class DriverRunner(
     conf: SparkConf,
@@ -79,6 +80,8 @@ private[deploy] class DriverRunner(
 
   /** Starts a thread to run and manage the driver. */
   private[worker] def start() = {
+    //DriverRunner机制
+    //启动一个java的线程
     new Thread("DriverRunner for " + driverId) {
       override def run() {
         var shutdownHook: AnyRef = null
@@ -111,6 +114,7 @@ private[deploy] class DriverRunner(
         }
 
         // notify worker of final driver state, possible exception
+        //启动完成后，向worker发送DriverStateChanged消息(调用DriverStateChanged方法进行一系列处理,获取driver的启动状态返回值)
         worker.send(DriverStateChanged(driverId, finalState.get, finalException))
       }
     }.start()
@@ -136,6 +140,7 @@ private[deploy] class DriverRunner(
    * Will throw an exception if there are errors preparing the directory.
    */
   private def createWorkingDirectory(): File = {
+    //使用workDir和driverId创建driver的工作目录
     val driverDir = new File(workDir, driverId)
     if (!driverDir.exists() && !driverDir.mkdirs()) {
       throw new IOException("Failed to create directory " + driverDir)
@@ -146,6 +151,7 @@ private[deploy] class DriverRunner(
   /**
    * Download the user jar into the supplied directory and return its local path.
    * Will throw an exception if there are errors downloading the jar.
+    * 将用户jar包下载到提供的目录中（之前创建的driver工作目录，并返回在worker本地工作目录的路径）
    */
   private def downloadUserJar(driverDir: File): String = {
     val jarFileName = new URI(driverDesc.jarUrl).getPath.split("/").last
@@ -168,8 +174,10 @@ private[deploy] class DriverRunner(
     localJarFile.getAbsolutePath
   }
 
-  private[worker] def prepareAndRunDriver(): Int = {
+  private[worker] def DriverStateChanged(): Int = {
+    //创建工作目录
     val driverDir = createWorkingDirectory()
+    //上传用户编写的jar（我们编写的spark应用程序打出来的jar包）到工作目录
     val localJarFilename = downloadUserJar(driverDir)
 
     def substituteVariables(argument: String): String = argument match {
@@ -179,9 +187,11 @@ private[deploy] class DriverRunner(
     }
 
     // TODO: If we add ability to submit multiple jars they should also be added here
+    //构建processBuilder
+    //传入了driver的启动命令，需要的内存大小等信息
     val builder = CommandUtils.buildProcessBuilder(driverDesc.command, securityManager,
       driverDesc.mem, sparkHome.getAbsolutePath, substituteVariables)
-
+    //调用runDriver（通过processBuilder）启动Driver
     runDriver(builder, driverDir, driverDesc.supervise)
   }
 
@@ -198,6 +208,7 @@ private[deploy] class DriverRunner(
       Files.append(header, stderr, StandardCharsets.UTF_8)
       CommandUtils.redirectStream(process.getErrorStream, stderr)
     }
+    //调用runCommandWithRetry启动
     runCommandWithRetry(ProcessBuilderLike(builder), initialize, supervise)
   }
 
@@ -220,6 +231,7 @@ private[deploy] class DriverRunner(
       }
 
       val processStart = clock.getTimeMillis()
+      //
       exitCode = process.get.waitFor()
 
       // check if attempting another run
@@ -233,7 +245,7 @@ private[deploy] class DriverRunner(
         waitSeconds = waitSeconds * 2 // exponential back-off
       }
     }
-
+    //返回driver退出时的状态
     exitCode
   }
 }

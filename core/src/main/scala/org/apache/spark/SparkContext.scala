@@ -363,6 +363,9 @@ class SparkContext(config: SparkConf) extends Logging {
     Utils.setLogLevel(org.apache.log4j.Level.toLevel(upperCased))
   }
 
+  /**
+    * 代码块，每次构造sparkcontext时执行
+    */
   try {
     _conf = config.clone()
     _conf.validateSettings()
@@ -495,6 +498,7 @@ class SparkContext(config: SparkConf) extends Logging {
       HeartbeatReceiver.ENDPOINT_NAME, new HeartbeatReceiver(this))
 
     // Create and start the scheduler
+    //根据提交任务的deploy-mode创建不同类型的TaskScheduler和backend
     val (sched, ts) = SparkContext.createTaskScheduler(this, master, deployMode)
     _schedulerBackend = sched
     _taskScheduler = ts
@@ -508,6 +512,7 @@ class SparkContext(config: SparkConf) extends Logging {
 
     // start TaskScheduler after taskScheduler sets DAGScheduler reference in DAGScheduler's
     // constructor
+    //启动taskscheduler，调用TaskSchedulerImpl的start方法
     _taskScheduler.start()
 
     _applicationId = _taskScheduler.applicationId()
