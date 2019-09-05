@@ -345,9 +345,10 @@ private[deploy] class Master(
           logWarning(s"Got status update for unknown executor $appId/$execId")
       }
 
+    //处理worker传送过来的DriverStateChanged信息
     case DriverStateChanged(driverId, state, exception) =>
       state match {
-          //判断如果driver的状态是错误、完成、被杀掉、失败，则会move掉该driver
+        //判断如果driver的状态是错误、完成、被杀掉、失败，则会move掉该driver
         case DriverState.ERROR | DriverState.FINISHED | DriverState.KILLED | DriverState.FAILED =>
           removeDriver(driverId, state, exception)
         case _ =>
@@ -645,10 +646,137 @@ private[deploy] class Master(
     * * 假设：集群有4个Worker，每个Worker16核；要求3个Executor，每个Executor需要16核；
     * * 如果一个core一次，则需要从每个Worker上取出12个core分配给每一个Executor
     * * 由于 12 < 16 ，将没有Executor被启动。
-    * ————————————————
-    * 版权声明：本文为CSDN博主「生命不息丶折腾不止」的原创文章，遵循 CC 4.0 BY-SA 版权协议，转载请附上原文出处链接及本声明。
-    * 原文链接：https://blog.csdn.net/leen0304/article/details/78416425
    */
+  /**
+  举例说明
+  每一个application至少包含以下基本属性:
+  coresPerExecutor：每一个Executor进程的cpu cores个数
+  memoryPerExecutor：每一个Executor进程的memory大小
+  maxCores: 这个application最多需要的cpu cores个数。
+
+  每一个worker至少包含以下基本属性：
+  freeCores:worker 节点当前可用的cpu cores个数
+  memoryFree:worker节点当前可用的memory大小。
+
+  假设一个待注册的application如下：
+  coresPerExecutor：2
+  memoryPerExecutor：512M
+  maxCores: 12
+  这表示这个application 最多需要12个cpu cores，每一个Executor都要2个core，512M内存。
+
+  假设某一时刻spark集群有如下几个worker节点,他们按照coresFree降序排列:
+  Worker1:coresFree=10  memoryFree=10G
+  Worker2:coresFree=7   memoryFree=1G
+  Worker3:coresFree=3   memoryFree=2G
+  Worker4:coresFree=2   memoryFree=215M
+  Worker5:coresFree=1   memoryFree=1G
+
+  其中worker5不满足application的要求：worker5.coresFree < application.coresPerExecutor
+  worker4也不满足application的要求:worker4.memoryFree < application.memoryPerExecutor
+  因此最终满足调度要求的worker节点只有前三个，我们将这三个节点记作usableWorkers。
+
+  SPREADOUT算法
+  先介绍spreadOut算法吧。上面已经说了，满足条件的worker只有前三个:
+  Worker1:coresFree=10  memoryFree=10G
+  Worker2:coresFree=7   memoryFree=1G
+  Worker3:coresFree=3   memoryFree=2G
+
+  第一次调度之后，worker列表如下:
+  Worker1:coresFree=8  memoryFree=9.5G  assignedExecutors=1  assignedCores=2
+  Worker2:coresFree=7  memoryFree=1G    assignedExecutors=0  assignedCores=0
+  Worker3:coresFree=3  memoryFree=2G    assignedExecutors=0  assignedCores=0
+  totalExecutors:1,totalCores=2
+  可以发现，worker1的coresFree和memoryFree都变小了而worker2，worker3并没有发生改变，这是因为
+  我们在worker1上面分配了一个Executor进程(这个Executor进程占用2个cpu cores，512M memory)而没
+  有在workre2和worker3上分配。
+
+  接下来继续循环，开始去worker2上分配:
+  Worker1:coresFree=8  memoryFree=9.5G      assignedExecutors=1  assignedCores=2
+  Worker2:coresFree=5  memoryFree=512M      assignedExecutors=1  assignedCores=2
+  Worker3:coresFree=3  memoryFree=2G        assignedExecutors=0  assignedCores=0
+  totalExecutors:2,totalCores=4
+  此时已经分配了2个Executor进程，4个core。
+
+  接下来去worker3上分配:
+  Worker1:coresFree=8  memoryFree=9.5G      assignedExecutors=1  assignedCores=2
+  Worker2:coresFree=5  memoryFree=512M      assignedExecutors=1  assignedCores=2
+  Worker3:coresFree=1  memoryFree=1.5G      assignedExecutors=1  assignedCores=2
+  totalExecutors:3,totalCores=6
+
+  接下来再去worker1分配，然后worker2...依此类推...以round-robin方式分配，
+  由于worker3.coresFree < application.coresPerExecutor,不会在它上面分配资源了：
+  Worker1:coresFree=6  memoryFree=9.0G      assignedExecutors=2  assignedCores=4
+  Worker2:coresFree=5  memoryFree=512M      assignedExecutors=1  assignedCores=2
+  Worker3:coresFree=1  memoryFree=1.5G      assignedExecutors=1  assignedCores=2
+  totalExecutors:4,totalCores=8
+
+  Worker1:coresFree=6  memoryFree=9.0G      assignedExecutors=2  assignedCores=4
+  Worker2:coresFree=3  memoryFree=0M        assignedExecutors=2  assignedCores=4
+  Worker3:coresFree=1  memoryFree=1.5G      assignedExecutors=1  assignedCores=2
+  totalExecutors:5,totalCores=10
+  此时worker2也不满足要求了：worker2.memoryFree < application.memoryPerExecutor
+  因此，下一次分配就去worker1上了：
+  Worker1:coresFree=4  memoryFree=8.5G      assignedExecutors=3  assignedCores=6
+  Worker2:coresFree=3  memoryFree=0M        assignedExecutors=2  assignedCores=4
+  Worker3:coresFree=1  memoryFree=1.5G      assignedExecutors=1  assignedCores=2
+  totalExecutors:6,totalCores=12
+  ok，由于已经分配了12个core，达到了application的要求，所以不在为这个application调度了。
+
+  非SPREADOUT算法
+  那么非spraadOut算法呢？他是逮到一个worker如果不把他的资源耗尽了是不会放手的：
+  第一次调度，结果如下：
+  Worker1:coresFree=8  memoryFree=9.5G  assignedExecutors=1  assignedCores=2
+  Worker2:coresFree=7  memoryFree=1G    assignedExecutors=0  assignedCores=0
+  Worker3:coresFree=3  memoryFree=2G    assignedExecutors=0  assignedCores=0
+  totalExecutors:1,totalCores=2
+
+  第二次调度，结果如下：
+  Worker1:coresFree=6  memoryFree=9.0G  assignedExecutors=2  assignedCores=4
+  Worker2:coresFree=7  memoryFree=1G    assignedExecutors=0  assignedCores=0
+  Worker3:coresFree=3  memoryFree=2G    assignedExecutors=0  assignedCores=0
+  totalExecutors:2,totalCores=4
+
+  第三次调度，结果如下：
+  Worker1:coresFree=4  memoryFree=8.5    assignedExecutors=3  assignedCores=6
+  Worker2:coresFree=7  memoryFree=1G     assignedExecutors=0  assignedCores=0
+  Worker3:coresFree=3  memoryFree=2G     assignedExecutors=0  assignedCores=0
+  totalExecutors:3,totalCores=6
+
+  第四次调度，结果如下：
+  Worker1:coresFree=2   memoryFree=8.0G  assignedExecutors=4  assignedCores=8
+  Worker2:coresFree=7   memoryFree=1G    assignedExecutors=0  assignedCores=0
+  Worker3:coresFree=3   memoryFree=2G    assignedExecutors=0  assignedCores=0
+  totalExecutors:4,totalCores=8
+
+  第五次调度，结果如下：
+  Worker1:coresFree=0   memoryFree=7.5G  assignedExecutors=5  assignedCores=10
+  Worker2:coresFree=7   memoryFree=1G    assignedExecutors=0  assignedCores=0
+  Worker3:coresFree=3   memoryFree=2G    assignedExecutors=0  assignedCores=0
+  totalExecutors:5,totalCores=10
+  当worker1的coresfree已经耗尽了。由于application需要12个core，而这里才分配了10个，所以还要继续往下分配：
+
+  第五次调度，结果如下：
+  Worker1:coresFree=0   memoryFree=7.5G      assignedExecutors=5  assignedCores=10
+  Worker2:coresFree=5   memoryFree=512G      assignedExecutors=1  assignedCores=2
+  Worker3:coresFree=3   memoryFree=2G        assignedExecutors=0  assignedCores=0
+  totalExecutors:6,totalCores=12
+  ok，最终分配来12个core，满足了application的要求。
+
+  对比：
+  spreadOut算法中，是以round-robin方式，轮询的在worker节点上分配Executor进程，即以如下序列分配:
+  worker1,worker2... ... worker n,worker1... .... worker n
+  非spreadOut算法中，逮者一个worker就不放手，直到满足一下条件之一：
+  worker.freeCores < application.coresPerExecutor 或者 worker.memoryFree<application.memoryPerExecutor。
+  在上面两个例子中，虽然最终都分配了6个Executor进程和12个core，但是spreadOut方式下，6个Executor进程分散
+  在不同的worker节点上，充分利用了spark集群的worker节点，而非spreadOut方式下，只在worker1和worker2上分配
+  了Executor进程，并没有充分利用spark worker节点。
+
+  另外一种模式：SPREADOUT + ONEEXECUTORPERWORKER 算法
+  oneExecutorPerWorker = coresPerExecutor.isEmpty为true，即coresPerExecutor未定义
+  此时启动”oneExecutorPerWorker“机制，该机制下一个worker上只启动一个Executor进程，该进程包含所有分配的cores，
+  每一次调度给Executor分配一个core，并且onExecutorPerWorker机制不检查内存的限制。
+
+    */
   private def scheduleExecutorsOnWorkers(
       app: ApplicationInfo,
       usableWorkers: Array[WorkerInfo],
@@ -658,8 +786,8 @@ private[deploy] class Master(
     //每个Executor的最小核数，没配置即为1核
     val minCoresPerExecutor = coresPerExecutor.getOrElse(1)
     //判断配置中的每个Executor的cores是否为空
-    // 【如果为空，则表示每个Executor只用分配一个core（如果oneExecutorPerWorker为true那么代表minCoresPerExecutor为1）（代表对于当前的application只能在一个worker上启动该app的一个executor）】
-    //如果为空，即表示在一个worker上只能启动该application的一个Executor进程，并且onExecutorPerWorker机制不检查内存的限制
+    // 【如果为空，则表示每个Executor只用分配一个core（如果oneExecutorPerWorker为true那么代表minCoresPerExecutor为1，且对于当前的application只能在一个worker上启动该app的一个executor）】
+    //如果为空，即表示在一个worker上只能启动该application的一个Executor进程，并且oneExecutorPerWorker机制不检查内存的限制
     val oneExecutorPerWorker = coresPerExecutor.isEmpty
     //配置中每个Executor的内存
     val memoryPerExecutor = app.desc.memoryPerExecutorMB
@@ -674,7 +802,7 @@ private[deploy] class Master(
 
     /** Return whether the specified worker can launch an executor for this app. */
     /**
-      * 判断指定的worker是否可以为这个Application运行一个Executor
+      * 判断指定的worker剩余资源是否可以为这个Application运行一个Executor
       */
     def canLaunchExecutor(pos: Int): Boolean = {
       //判断是否继续调度：可以分配的核数 >= 每个Executor所需要的最小核数
@@ -684,7 +812,7 @@ private[deploy] class Master(
 
       // If we allow multiple executors per worker, then we can always launch new executors.
       // Otherwise, if there is already an executor on this worker, just give it more cores.
-      //在这个Worker上没有启动Executor，或者一个Executor上需要启动多个cores,oneExecutorPerWorker.empty=false,则说明一个Executor上需要启动多个cores
+      //在这个Worker上没有启动Executor，或者一个Executor上需要启动多个cores。oneExecutorPerWorker=false,则说明一个Executor上需要启动多个cores
       val launchingNewExecutor = !oneExecutorPerWorker || assignedExecutors(pos) == 0
       if (launchingNewExecutor) {
         //worker已经分配的memory，该worker上启动的Executors个数 * 每个Executor的内存
@@ -712,18 +840,16 @@ private[deploy] class Master(
         var keepScheduling = true
         while (keepScheduling && canLaunchExecutor(pos)) {
           coresToAssign -= minCoresPerExecutor
-          // 如果每个Worker只启动一个Executor(那么minCoresPerExecutor为1) ，那么每一次循环给这个Executor分配一个core
+          // 如果每个Worker只启动一个Executor(那么minCoresPerExecutor的值为1) ，那么每一次循环给这个Executor分配一个core
           assignedCores(pos) += minCoresPerExecutor
-
           // If we are launching one executor per worker, then every iteration assigns 1 core
           // to the executor. Otherwise, every iteration assigns cores to a new executor.
-          // 如果oneExecutorPerWorker为真，那么每个Worker只启动一个Executor，否则调度一次分配一个Executor
+          // 如果oneExecutorPerWorker为真，那么每个Worker只启动一个Executor ，否则调度一次启动一个Executor
           if (oneExecutorPerWorker) {
             assignedExecutors(pos) = 1
           } else {
             assignedExecutors(pos) += 1
           }
-
           // Spreading out an application means spreading out its executors across as
           // many workers as possible. If we are not spreading out, then we should keep
           // scheduling executors on this worker until we use all of its resources.
@@ -775,6 +901,8 @@ private[deploy] class Master(
         val assignedCores = scheduleExecutorsOnWorkers(app, usableWorkers, spreadOutApps)
 
         // Now that we've decided how many cores to allocate on each worker, let's allocate them
+        //通过上述过程，我们明确了每个worker分配多少cores给applicatuon，
+        // 通过调用allocateWorkerResourceToExecutors方法分配worker的cores
         for (pos <- 0 until usableWorkers.length if assignedCores(pos) > 0) {
           allocateWorkerResourceToExecutors(
             app, assignedCores(pos), app.desc.coresPerExecutor, usableWorkers(pos))
@@ -789,6 +917,10 @@ private[deploy] class Master(
    * @param assignedCores number of cores on this worker for this application
    * @param coresPerExecutor number of cores per executor
    * @param worker the worker info
+    * @param app executors 所属 application 的信息
+    * @param assignedCores 对于这个Application，在这个Worker上的cores数量
+    * @param coresPerExecutor 每个executor所需要的cores数量
+    * @param worker WorkerInfo
    */
   private def allocateWorkerResourceToExecutors(
       app: ApplicationInfo,
@@ -798,11 +930,20 @@ private[deploy] class Master(
     // If the number of cores per executor is specified, we divide the cores assigned
     // to this worker evenly among the executors with no remainder.
     // Otherwise, we launch a single executor that grabs all the assignedCores on this worker.
+    /**
+      * 如果每一个Executor所需的core的数量被配置(coresPerExecutor配置有值)，我们均匀的分配这个worker的cores给每一个Executor。
+      * 否则的话，我们仅仅启动一个Executor，它占用这个Worker的所有被分配出来的cores
+      */
     val numExecutors = coresPerExecutor.map { assignedCores / _ }.getOrElse(1)
+
+    //每个Executor所拥有的cores，coresPerExecutor的值或者分配的全部cores
     val coresToAssign = coresPerExecutor.getOrElse(assignedCores)
     for (i <- 1 to numExecutors) {
+      //添加Executor的信息 返回这个executor，调用ApplicationInfo的addExecutor方法
       val exec = app.addExecutor(worker, coresToAssign)
+      //在Worker上注册Executor
       launchExecutor(worker, exec)
+      //变更Application的状态为 RUNNING
       app.state = ApplicationState.RUNNING
     }
   }
