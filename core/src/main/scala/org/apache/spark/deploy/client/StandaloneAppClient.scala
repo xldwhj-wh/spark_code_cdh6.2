@@ -83,7 +83,7 @@ private[spark] class StandaloneAppClient(
 
     override def onStart(): Unit = {
       try {
-        //执行注册Master命令
+        //执行Application注册Master命令
         registerWithMaster(1)
       } catch {
         case e: Exception =>

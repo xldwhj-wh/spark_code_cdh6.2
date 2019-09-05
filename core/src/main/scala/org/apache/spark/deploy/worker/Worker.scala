@@ -486,6 +486,7 @@ private[deploy] class Worker(
       logInfo(s"Master with url $masterUrl requested this worker to reconnect.")
       registerWithMaster()
 
+    //处理从master发送过来的LaunchExecutor消息
     case LaunchExecutor(masterUrl, appId, execId, appDesc, cores_, memory_) =>
       if (masterUrl != activeMasterUrl) {
         logWarning("Invalid Master (" + masterUrl + ") attempted to launch executor.")
@@ -522,6 +523,7 @@ private[deploy] class Worker(
             dirs
           })
           appDirectories(appId) = appLocalDirs
+          //创建ExecutorRunner
           val manager = new ExecutorRunner(
             appId,
             execId,
@@ -538,10 +540,15 @@ private[deploy] class Worker(
             workerUri,
             conf,
             appLocalDirs, ExecutorState.RUNNING)
+          //把创建的ExecutorRunner manager加入缓存中
           executors(appId + "/" + execId) = manager
+          //启动ExecutorRunner
           manager.start()
+
+          //加上Executor使用的资源
           coresUsed += cores_
           memoryUsed += memory_
+          //启动完成后向master发送ExecutorStateChanged消息
           sendToMaster(ExecutorStateChanged(appId, execId, manager.state, None, None))
         } catch {
           case e: Exception =>
@@ -554,7 +561,7 @@ private[deploy] class Worker(
               Some(e.toString), None))
         }
       }
-
+    //处理ExecutorRunenr发送过来的executorStateChanged消息LaunchExecutor-->ExecutorRunner
     case executorStateChanged @ ExecutorStateChanged(appId, execId, state, message, exitStatus) =>
       handleExecutorStateChanged(executorStateChanged)
 
@@ -602,7 +609,7 @@ private[deploy] class Worker(
 
     //driver执行完之后，DriverRunner线程会发送过来driverStateChanged（DriverStateChanged）取得的driver状态信息
     case driverStateChanged @ DriverStateChanged(driverId, state, exception) =>
-      /调用handleDriverStateChanged向master发送driverStateChanged（driver启动后的状态码）
+      //调用handleDriverStateChanged向master发送driverStateChanged（driver启动后的状态码）
       handleDriverStateChanged(driverStateChanged)
 
     case ReregisterWithMaster =>
@@ -721,17 +728,24 @@ private[deploy] class Worker(
     }
     //向master发送driverStateChanged消息
     sendToMaster(driverStateChanged)
+    //将Driver从本地缓存移除
     val driver = drivers.remove(driverId).get
+    //将Driver加入完成Driver的队列
     finishedDrivers(driverId) = driver
     trimFinishedDriversIfNecessary()
+
+    //将Driver的内存和cpu释放出来
     memoryUsed -= driver.driverDesc.mem
     coresUsed -= driver.driverDesc.cores
   }
 
   private[worker] def handleExecutorStateChanged(executorStateChanged: ExecutorStateChanged):
     Unit = {
+    //首先向master发送executorStateChanged消息
     sendToMaster(executorStateChanged)
     val state = executorStateChanged.state
+
+    //如果executor的状态是finish
     if (ExecutorState.isFinished(state)) {
       val appId = executorStateChanged.appId
       val fullId = appId + "/" + executorStateChanged.execId
@@ -742,9 +756,13 @@ private[deploy] class Worker(
           logInfo("Executor " + fullId + " finished with state " + state +
             message.map(" message " + _).getOrElse("") +
             exitStatus.map(" exitStatus " + _).getOrElse(""))
+          //将executor从内存缓存中移除
           executors -= fullId
+          //将executor加入已完成队列
           finishedExecutors(fullId) = executor
           trimFinishedExecutorsIfNecessary()
+
+          //释放executor占用的cpu和内存资源
           coresUsed -= executor.cores
           memoryUsed -= executor.memory
           if (CLEANUP_NON_SHUFFLE_FILES_ENABLED) {
@@ -755,6 +773,7 @@ private[deploy] class Worker(
             message.map(" message " + _).getOrElse("") +
             exitStatus.map(" exitStatus " + _).getOrElse(""))
       }
+      //根据Application完成的状态和Executor的退出状态，执行Application的clean操作
       maybeCleanupApplication(appId)
     }
   }

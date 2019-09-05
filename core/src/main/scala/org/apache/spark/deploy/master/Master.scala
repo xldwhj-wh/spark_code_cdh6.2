@@ -217,7 +217,7 @@ private[deploy] class Master(
   }
 
   override def receive: PartialFunction[Any, Unit] = {
-    //master准备切换源码
+    //master主备切换源码
     case ElectedLeader =>
       val (storedApps, storedDrivers, storedWorkers) = persistenceEngine.readPersistedData(rpcEnv)
       state = if (storedApps.isEmpty && storedDrivers.isEmpty && storedWorkers.isEmpty) {
@@ -289,6 +289,7 @@ private[deploy] class Master(
         schedule()
       }
 
+    //处理从worker发送过来的ExecutorStateChanged消息
     case ExecutorStateChanged(appId, execId, state, message, exitStatus) =>
       //找到executor对应的app，然后在反过来调用app内部的executors缓存来获取executor信息
       val execOption = idToApp.get(appId).flatMap(app => app.executors.get(execId))
@@ -350,6 +351,7 @@ private[deploy] class Master(
       state match {
         //判断如果driver的状态是错误、完成、被杀掉、失败，则会move掉该driver
         case DriverState.ERROR | DriverState.FINISHED | DriverState.KILLED | DriverState.FAILED =>
+          //移除master上注册的Driver
           removeDriver(driverId, state, exception)
         case _ =>
           throw new Exception(s"RdriverIeceived unexpected state update for driver $d: $state")
@@ -936,12 +938,12 @@ private[deploy] class Master(
       */
     val numExecutors = coresPerExecutor.map { assignedCores / _ }.getOrElse(1)
 
-    //每个Executor所拥有的cores，coresPerExecutor的值或者分配的全部cores
+    //每个Executor所拥有的cores，等于coresPerExecutor的值或者分配的全部cores
     val coresToAssign = coresPerExecutor.getOrElse(assignedCores)
     for (i <- 1 to numExecutors) {
       //添加Executor的信息 返回这个executor，调用ApplicationInfo的addExecutor方法
       val exec = app.addExecutor(worker, coresToAssign)
-      //在Worker上注册Executor
+      //在Worker上注册启动Executor
       launchExecutor(worker, exec)
       //变更Application的状态为 RUNNING
       app.state = ApplicationState.RUNNING
@@ -1001,11 +1003,15 @@ private[deploy] class Master(
     startExecutorsOnWorkers()
   }
 
+  //schedule调度阶段通过launchExecutor启动Executor
   private def launchExecutor(worker: WorkerInfo, exec: ExecutorDesc): Unit = {
     logInfo("Launching executor " + exec.fullId + " on worker " + worker.id)
+    //添加exec信息到worker中
     worker.addExecutor(exec)
+    //向woreker发送LaunchExecutor消息
     worker.endpoint.send(LaunchExecutor(masterUrl,
       exec.application.id, exec.id, exec.application.desc, exec.cores, exec.memory))
+    //向driver（StandaloneAppClient）发送ExecutorAdded消息
     exec.application.driver.send(
       ExecutorAdded(exec.id, worker.id, worker.hostPort, exec.cores, exec.memory))
   }
@@ -1290,7 +1296,7 @@ private[deploy] class Master(
       //如果找到了对应的值，Some是样例类（Option）
       case Some(driver) =>
         logInfo(s"Removing driver: $driverId")
-        //将driver从内存缓存中移除
+        //将driver从master注册内存缓存中移除
         drivers -= driver
         //RETAINED_DRIVERS指master节点中最多存储的driver记录，默认为200
         if (completedDrivers.size >= RETAINED_DRIVERS) {
