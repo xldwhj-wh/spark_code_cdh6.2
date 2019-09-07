@@ -843,6 +843,8 @@ class SparkContext(config: SparkConf) extends Logging {
       path: String,
       minPartitions: Int = defaultMinPartitions): RDD[String] = withScope {
     assertNotStopped()
+    //TextInputFormat输入格式化类型
+    //传进来的key是LongWritable，values是Text
     hadoopFile(path, classOf[TextInputFormat], classOf[LongWritable], classOf[Text],
       minPartitions).map(pair => pair._2.toString).setName(path)
   }
@@ -2069,6 +2071,7 @@ class SparkContext(config: SparkConf) extends Logging {
    * partitions of the target RDD, e.g. for operations like `first()`
    * @param resultHandler callback to pass each result to
    */
+  //RDD运行action操作时调用SparkContext的一系列runJob操作
   def runJob[T, U: ClassTag](
       rdd: RDD[T],
       func: (TaskContext, Iterator[T]) => U,
@@ -2083,6 +2086,7 @@ class SparkContext(config: SparkConf) extends Logging {
     if (conf.getBoolean("spark.logLineage", false)) {
       logInfo("RDD's recursive dependencies:\n" + rdd.toDebugString)
     }
+    //继续调用DagScheduler的runjob方法
     dagScheduler.runJob(rdd, cleanedFunc, partitions, callSite, resultHandler, localProperties.get)
     progressBar.foreach(_.finishAll())
     rdd.doCheckpoint()
@@ -2813,11 +2817,13 @@ object SparkContext extends Logging {
         (backend, scheduler)
 
       case masterUrl =>
+        // getClusterManager方法根据masterUrl选出符合的类构造scheduler和backend
         val cm = getClusterManager(masterUrl) match {
           case Some(clusterMgr) => clusterMgr
           case None => throw new SparkException("Could not parse Master URL: '" + master + "'")
         }
         try {
+          //
           val scheduler = cm.createTaskScheduler(sc, masterUrl)
           val backend = cm.createSchedulerBackend(sc, masterUrl, scheduler)
           cm.initialize(scheduler, backend)
@@ -2832,6 +2838,9 @@ object SparkContext extends Logging {
 
   private def getClusterManager(url: String): Option[ExternalClusterManager] = {
     val loader = Utils.getContextOrSparkClassLoader
+    //先加载所有ExternalClusterManager的实现类，
+    // 然后根据方法中的ExternalClusterManager类中的canCreate方法来判断哪一个实现类符合url的规制
+    // 获取到这个实例对象
     val serviceLoaders =
       ServiceLoader.load(classOf[ExternalClusterManager], loader).asScala.filter(_.canCreate(url))
     if (serviceLoaders.size > 1) {

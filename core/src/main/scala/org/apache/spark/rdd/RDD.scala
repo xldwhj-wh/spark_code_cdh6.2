@@ -942,6 +942,7 @@ abstract class RDD[T: ClassTag](
    * all the data is loaded into the driver's memory.
    */
   def collect(): Array[T] = withScope {
+    //action操作，调用SparkContext的runJob操作
     val results = sc.runJob(this, (iter: Iterator[T]) => iter.toArray)
     Array.concat(results: _*)
   }
@@ -1964,7 +1965,8 @@ object RDD {
   // `import SparkContext._` to enable them. Now we move them here to make the compiler find
   // them automatically. However, we still keep the old functions in SparkContext for backward
   // compatibility and forward to the following functions directly.
-
+  //其实RDD中是没有reduceByKey，当调用reduceByKey时会触发scala的隐式转换，此时就会在作用域内，寻找RDD中的隐式转换，
+  // 调用rddToPairRDDFunctions方法将rdd转换为PairRDDFunctions，使用PairRDDFunctions中的reduceByKey进行处理
   implicit def rddToPairRDDFunctions[K, V](rdd: RDD[(K, V)])
     (implicit kt: ClassTag[K], vt: ClassTag[V], ord: Ordering[K] = null): PairRDDFunctions[K, V] = {
     new PairRDDFunctions(rdd)
