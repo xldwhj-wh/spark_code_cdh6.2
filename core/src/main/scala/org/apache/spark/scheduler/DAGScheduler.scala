@@ -336,7 +336,7 @@ private[spark] class DAGScheduler(
    * Gets a shuffle map stage if one exists in shuffleIdToMapStage. Otherwise, if the
    * shuffle map stage doesn't already exist, this method will create the shuffle map stage in
    * addition to any missing ancestor shuffle map stages.
-   * 对于给定的ShuffleDependency，该方法会创建一个ShuffleMapStage，与其相关的所有祖先ShuffleDependency对应的ShuffleMapStage也都会被创建。
+   * 对于给定的ShuffleDependency，该方法会创建一个ShuffleMapStage，并且与其相关的所有祖先ShuffleDependency对应的ShuffleMapStage也都会被创建。
    */
   private def getOrCreateShuffleMapStage(
       shuffleDep: ShuffleDependency[_, _, _],
@@ -348,7 +348,8 @@ private[spark] class DAGScheduler(
       // 不存在，则新建一个ShuffleMapStage
       case None =>
         // Create stages for all missing ancestor shuffle dependencies.
-        // 获取或新建该ShuffleDependency所依赖的所有的ShuffleMapStage
+        // 以shuffleDep.rdd倒退出生成shuffleDep.rdd的所有宽依赖，
+        // 并根据所有的宽依赖循环创建shuffleDep.rdd的所有ShuffleMapStage
         getMissingAncestorShuffleDependencies(shuffleDep.rdd).foreach { dep =>
           // Even though getMissingAncestorShuffleDependencies only returns shuffle dependencies
           // that were not already in shuffleIdToMapStage, it's possible that by the time we
@@ -361,7 +362,7 @@ private[spark] class DAGScheduler(
           }
         }
         // Finally, create a stage for the given shuffle dependency.
-        // 对当前的ShuffleDependency，新建一个ShuffleMapStage
+        // 对当前传入的ShuffleDependency，新建一个ShuffleMapStage
         createShuffleMapStage(shuffleDep, firstJobId)
     }
   }
@@ -471,6 +472,7 @@ private[spark] class DAGScheduler(
    */
   private def getOrCreateParentStages(rdd: RDD[_], firstJobId: Int): List[Stage] = {
     //getShuffleDependencies方法获得RDD直接相关的ShuffleDependencies(最近的ShuffleDependencies)
+    //如果该RDD其与上一个RDD的关系为窄依赖，则继续向上遍历直到寻找到所有的ShuffleDependencies
     getShuffleDependencies(rdd).map { shuffleDep =>
       //getOrCreateShuffleMapStage获得或者新建一个ShuffleDependence依赖的所有ShuffleMapStage。
       getOrCreateShuffleMapStage(shuffleDep, firstJobId)
@@ -480,19 +482,24 @@ private[spark] class DAGScheduler(
   /** Find ancestor shuffle dependencies that are not registered in shuffleToMapStage yet */
   private def getMissingAncestorShuffleDependencies(
       rdd: RDD[_]): ArrayStack[ShuffleDependency[_, _, _]] = {
+    //存放该RDD所有的祖先ShuffleDependency
     val ancestors = new ArrayStack[ShuffleDependency[_, _, _]]
     val visited = new HashSet[RDD[_]]
     // We are manually maintaining a stack here to prevent StackOverflowError
     // caused by recursively visiting
     val waitingForVisit = new ArrayStack[RDD[_]]
+    //将该RDD压入waitingForVisit栈中
     waitingForVisit.push(rdd)
     while (waitingForVisit.nonEmpty) {
       val toVisit = waitingForVisit.pop()
       if (!visited(toVisit)) {
         visited += toVisit
+        //返回一个RDD的所有宽依赖，即和该RDD直接相关的父宽依赖集合
         getShuffleDependencies(toVisit).foreach { shuffleDep =>
           if (!shuffleIdToMapStage.contains(shuffleDep.shuffleId)) {
+            //宽依赖未被注册，则加入
             ancestors.push(shuffleDep)
+            //并且继续向前寻找未被注册的宽依赖,这可以找到该RDD所有的宽依赖关系
             waitingForVisit.push(shuffleDep.rdd)
           } // Otherwise, the dependency and its ancestors have already been registered.
         }
@@ -512,7 +519,7 @@ private[spark] class DAGScheduler(
    * calling this function with rdd C will only return the B <-- C dependency.
    *
    * This function is scheduler-visible for the purpose of unit testing.
-   * 返回一个RDD的所有宽依赖，即和该RDD直接相关的父依赖集合，从FinalRDD开始反向进行Stage划分
+   * 返回一个RDD的所有宽依赖，即和该RDD直接相关的父宽依赖集合，从FinalRDD开始反向进行Stage划分
    */
   private[scheduler] def getShuffleDependencies(
       rdd: RDD[_]): HashSet[ShuffleDependency[_, _, _]] = {
@@ -573,24 +580,34 @@ private[spark] class DAGScheduler(
     true
   }
 
+  /**
+    * 得到该Stage所有未被计算的祖先Stage集合
+    */
   private def getMissingParentStages(stage: Stage): List[Stage] = {
     val missing = new HashSet[Stage]
     val visited = new HashSet[RDD[_]]
     // We are manually maintaining a stack here to prevent StackOverflowError
     // caused by recursively visiting
+    // 利用一个栈来保存未被处理的RDD
     val waitingForVisit = new ArrayStack[RDD[_]]
+    // 使用visit方法来遍历栈中未被处理的RDD
     def visit(rdd: RDD[_]) {
       if (!visited(rdd)) {
         visited += rdd
         val rddHasUncachedPartitions = getCacheLocs(rdd).contains(Nil)
         if (rddHasUncachedPartitions) {
+          // 依次遍历RDD的依赖关系
           for (dep <- rdd.dependencies) {
             dep match {
+              // 如果是宽依赖关系，利用getOrCreateShuffleMapStage方法获取该ShuffleDependency对应的ShuffleMapStage
+              // 以及所有依赖的祖先ShuffleMapStage
               case shufDep: ShuffleDependency[_, _, _] =>
                 val mapStage = getOrCreateShuffleMapStage(shufDep, stage.firstJobId)
+                // 判断Stage是否可用
                 if (!mapStage.isAvailable) {
                   missing += mapStage
                 }
+              // 如果是窄依赖，则将RDD放入栈中
               case narrowDep: NarrowDependency[_] =>
                 waitingForVisit.push(narrowDep.rdd)
             }
@@ -598,7 +615,9 @@ private[spark] class DAGScheduler(
         }
       }
     }
+    // 首先向栈中推入了该stage中的最后一个RDD
     waitingForVisit.push(stage.rdd)
+    // 如果栈不空，则遍历所有栈中的RDD
     while (waitingForVisit.nonEmpty) {
       visit(waitingForVisit.pop())
     }
@@ -989,9 +1008,9 @@ private[spark] class DAGScheduler(
     try {
       // New stage creation may throw an exception if, for example, jobs are run on a
       // HadoopRDD whose underlying HDFS files have been deleted.
-      // 利用DAG图中的最后一个RDD，即finalRDD来创建finalStage，并将它加入DAGScheduler内部的内
-      // 存缓冲中,利用createResultStage方法来创建ResultStage,而在createResultStage方法中会将
-      // 对应的所有ShuffleMapStage创建完毕。
+      // 利用DAG图中的最后一个RDD，即finalRDD来创建finalStage，并将它加入DAGScheduler内部的内存缓冲中
+      // 利用createResultStage方法来创建ResultStage,而在createResultStage方法中会将所有的ShuffleMapStage创建完毕。
+      // 在调用createResultStage之后，一个DAG图中的所有的Stage都已经被创建出来，即ResultStage和ShuffleMapStage，此时需要将Stage进行提交执行。即调用submitStage方法
       finalStage = createResultStage(finalRDD, func, partitions, jobId, callSite)
     } catch {
       case e: BarrierJobSlotsNumberCheckFailed =>
@@ -1027,6 +1046,7 @@ private[spark] class DAGScheduler(
     // Job submitted, clear internal data.
     barrierJobIdToNumTasksCheckFailures.remove(jobId)
 
+    // 用finalStage来创建一个job
     val job = new ActiveJob(jobId, finalStage, callSite, listener, properties)
     clearCacheLocs()
     logInfo("Got job %s (%s) with %d output partitions".format(
@@ -1035,6 +1055,7 @@ private[spark] class DAGScheduler(
     logInfo("Parents of final stage: " + finalStage.parents)
     logInfo("Missing parents: " + getMissingParentStages(finalStage))
 
+    // 将job加入内部缓存中
     val jobSubmissionTime = clock.getTimeMillis()
     jobIdToActiveJob(jobId) = job
     activeJobs += job
@@ -1043,6 +1064,8 @@ private[spark] class DAGScheduler(
     val stageInfos = stageIds.flatMap(id => stageIdToStage.get(id).map(_.latestInfo))
     listenerBus.post(
       SparkListenerJobStart(job.jobId, jobSubmissionTime, stageInfos, properties))
+
+    // 使用submitStage方法来提交finalStage,最后的结果就是第一个未执行的Stage提交执行，其他Stage都在等待队列中
     submitStage(finalStage)
   }
 
@@ -1089,21 +1112,28 @@ private[spark] class DAGScheduler(
     }
   }
 
-  /** Submits stage, but first recursively submits any missing parents. */
+  /** Submits stage, but first recursively submits any missing parents.
+    * 在submitStage方法中提交执行stage，在提交该stage时，会递归提交计算该stage未被计算的父satges
+    * stage提交过程案列可参考《图解Spark核心技术与案例实战》图书P109、112图书示例加深理解
+    * */
   private def submitStage(stage: Stage) {
     val jobId = activeJobForStage(stage)
     if (jobId.isDefined) {
       logDebug("submitStage(" + stage + ")")
       if (!waitingStages(stage) && !runningStages(stage) && !failedStages(stage)) {
+        // 调用getMissingParentStages方法获得该Stage所有的父Stage，将其父stage存放在missing中并且按照stage id进行排序
         val missing = getMissingParentStages(stage).sortBy(_.id)
         logDebug("missing: " + missing)
+        //如果该stage不存在父stage，则直接提交该stage中的所有任务
         if (missing.isEmpty) {
           logInfo("Submitting " + stage + " (" + stage.rdd + "), which has no missing parents")
           submitMissingTasks(stage, jobId.get)
         } else {
+          // 如果存在未被提交执行的父Stage，则递归提交父stage
           for (parent <- missing) {
             submitStage(parent)
           }
+          // 将该stage加入到等待stage集合中
           waitingStages += stage
         }
       }
