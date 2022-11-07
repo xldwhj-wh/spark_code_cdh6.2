@@ -140,7 +140,7 @@
     <jetty.version>${cdh.jetty9.version}</jetty.version>
     <javaxservlet.version>3.1.0</javaxservlet.version>
     <chill.version>0.9.3</chill.version>
-    <ivy.version>2.4.0</ivy.version>
+    <ivy.version>2.5.1</ivy.version>
     <oro.version>2.0.8</oro.version>
     <codahale.metrics.version>3.1.5</codahale.metrics.version>
     <avro.version>${cdh.avro.version}</avro.version>
